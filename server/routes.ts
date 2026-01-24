@@ -4,17 +4,139 @@ import multer from "multer";
 import { storage } from "./storage";
 import { api } from "@shared/routes";
 import { speechToText, openai, convertWebmToWav } from "./replit_integrations/audio/client";
+import { exec } from "child_process";
+import { promisify } from "util";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
 
-// Configure upload - supports both file upload and recorded audio
+const execAsync = promisify(exec);
+
+// ============================================================
+// UPLOAD CONFIGURATION
+// Increased limit to 100MB to handle long lectures
+// Files larger than this will show a friendly error
+// ============================================================
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB limit
+
 const upload = multer({ 
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 50 * 1024 * 1024, // Increased to 50MB for longer recordings
+    fileSize: MAX_FILE_SIZE,
   }
 });
 
 // ============================================================
-// CHUNKING HELPER FUNCTIONS
+// AUDIO CHUNKING HELPERS
+// These functions split long audio files into smaller pieces
+// for reliable transcription of lengthy lectures
+// ============================================================
+
+/**
+ * Splits a large audio file into smaller chunks using FFmpeg.
+ * Each chunk is approximately 2-3 minutes (180 seconds) long.
+ * This prevents transcription API timeouts and memory issues.
+ * 
+ * @param audioBuffer - The original audio file buffer
+ * @param format - The audio format (wav, mp3, webm)
+ * @returns Array of audio chunk buffers
+ */
+async function splitAudioIntoChunks(
+  audioBuffer: Buffer, 
+  format: string
+): Promise<Buffer[]> {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "audio-chunks-"));
+  const inputPath = path.join(tempDir, `input.${format}`);
+  const outputPattern = path.join(tempDir, "chunk_%03d.wav");
+  
+  try {
+    // Write input file to temp directory
+    fs.writeFileSync(inputPath, audioBuffer);
+    
+    // Get audio duration using ffprobe
+    const { stdout: durationOutput } = await execAsync(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${inputPath}"`
+    );
+    const duration = parseFloat(durationOutput.trim());
+    console.log(`  Audio duration: ${duration.toFixed(1)} seconds`);
+    
+    // If audio is short (under 3 minutes), no need to split
+    const CHUNK_DURATION = 180; // 3 minutes per chunk
+    if (duration <= CHUNK_DURATION) {
+      console.log("  Audio is short enough, no splitting needed");
+      // Convert to WAV for consistent processing
+      const wavPath = path.join(tempDir, "single.wav");
+      await execAsync(
+        `ffmpeg -i "${inputPath}" -ar 16000 -ac 1 -f wav "${wavPath}" -y`
+      );
+      const wavBuffer = fs.readFileSync(wavPath);
+      return [wavBuffer];
+    }
+    
+    // Split into chunks using FFmpeg segment muxer
+    // -f segment: use segment muxer to split file
+    // -segment_time: duration of each chunk in seconds
+    // -ar 16000: resample to 16kHz (optimal for speech recognition)
+    // -ac 1: convert to mono
+    console.log(`  Splitting into ~${Math.ceil(duration / CHUNK_DURATION)} chunks...`);
+    
+    await execAsync(
+      `ffmpeg -i "${inputPath}" -f segment -segment_time ${CHUNK_DURATION} -ar 16000 -ac 1 "${outputPattern}" -y`
+    );
+    
+    // Read all generated chunk files
+    const chunks: Buffer[] = [];
+    const files = fs.readdirSync(tempDir)
+      .filter(f => f.startsWith("chunk_"))
+      .sort();
+    
+    for (const file of files) {
+      const chunkPath = path.join(tempDir, file);
+      chunks.push(fs.readFileSync(chunkPath));
+    }
+    
+    console.log(`  Created ${chunks.length} audio chunks`);
+    return chunks;
+    
+  } finally {
+    // Cleanup temp files
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (e) {
+      console.warn("Failed to cleanup temp dir:", e);
+    }
+  }
+}
+
+/**
+ * Transcribes multiple audio chunks and merges the results.
+ * Each chunk is transcribed separately to avoid API limits.
+ * 
+ * @param chunks - Array of audio chunk buffers
+ * @returns Combined transcription text
+ */
+async function transcribeChunks(chunks: Buffer[]): Promise<string> {
+  const transcriptions: string[] = [];
+  
+  for (let i = 0; i < chunks.length; i++) {
+    console.log(`  Transcribing chunk ${i + 1}/${chunks.length}...`);
+    
+    try {
+      const text = await speechToText(chunks[i], "wav");
+      transcriptions.push(text);
+    } catch (err: any) {
+      console.error(`  Chunk ${i + 1} transcription failed:`, err.message);
+      // Continue with other chunks, don't fail completely
+      transcriptions.push(`[Transcription failed for segment ${i + 1}]`);
+    }
+  }
+  
+  // Join all transcriptions with proper spacing
+  return transcriptions.join(" ");
+}
+
+// ============================================================
+// TEXT CHUNKING HELPER FUNCTIONS
 // These functions split long transcripts into smaller pieces
 // for better AI processing of lengthy lectures
 // ============================================================
@@ -22,13 +144,8 @@ const upload = multer({
 /**
  * Splits text into chunks of approximately targetWords size.
  * Tries to split on sentence boundaries to preserve context.
- * 
- * @param text - The full transcript text
- * @param targetWords - Target words per chunk (default 600, range 500-800)
- * @returns Array of text chunks
  */
 function splitIntoChunks(text: string, targetWords: number = 600): string[] {
-  // Split text into sentences (handles common sentence endings)
   const sentences = text.split(/(?<=[.!?])\s+/);
   const chunks: string[] = [];
   let currentChunk: string[] = [];
@@ -37,7 +154,6 @@ function splitIntoChunks(text: string, targetWords: number = 600): string[] {
   for (const sentence of sentences) {
     const sentenceWordCount = sentence.split(/\s+/).length;
     
-    // If adding this sentence exceeds target and we have content, start new chunk
     if (currentWordCount + sentenceWordCount > targetWords && currentChunk.length > 0) {
       chunks.push(currentChunk.join(" "));
       currentChunk = [];
@@ -48,7 +164,6 @@ function splitIntoChunks(text: string, targetWords: number = 600): string[] {
     currentWordCount += sentenceWordCount;
   }
 
-  // Don't forget the last chunk
   if (currentChunk.length > 0) {
     chunks.push(currentChunk.join(" "));
   }
@@ -58,14 +173,9 @@ function splitIntoChunks(text: string, targetWords: number = 600): string[] {
 
 /**
  * Generates a mini-summary for a single chunk of text.
- * Used when processing long lectures in pieces.
- * 
- * @param chunk - A portion of the transcript
- * @param chunkIndex - The index of this chunk (for logging)
- * @returns A condensed summary of the chunk
  */
 async function summarizeChunk(chunk: string, chunkIndex: number): Promise<string> {
-  console.log(`  Summarizing chunk ${chunkIndex + 1}...`);
+  console.log(`  Summarizing text chunk ${chunkIndex + 1}...`);
   
   const prompt = `
     Summarize the following lecture segment in 100-150 words.
@@ -87,12 +197,7 @@ async function summarizeChunk(chunk: string, chunkIndex: number): Promise<string
 }
 
 /**
- * Processes long transcripts by chunking and summarizing each piece,
- * then combining for final analysis. This prevents AI context limits
- * and improves output quality for long lectures.
- * 
- * @param transcription - The full lecture transcription
- * @returns Object with summary, structured notes, and Q&A pairs
+ * Processes long transcripts by chunking and summarizing each piece.
  */
 async function processLongTranscript(transcription: string): Promise<{
   summary: string;
@@ -100,44 +205,32 @@ async function processLongTranscript(transcription: string): Promise<{
   qaPairs: { question: string; answer: string; marks: 2 | 4 }[];
 }> {
   const wordCount = transcription.split(/\s+/).length;
-  
-  // Threshold: if transcript is longer than 1000 words, use chunking
   const CHUNK_THRESHOLD = 1000;
   
   if (wordCount <= CHUNK_THRESHOLD) {
-    // Short transcript - process directly without chunking
     console.log(`Short transcript (${wordCount} words), processing directly...`);
     return await generateFinalContent(transcription);
   }
 
-  // Long transcript - apply chunking strategy
-  console.log(`Long transcript (${wordCount} words), applying chunking...`);
+  console.log(`Long transcript (${wordCount} words), applying text chunking...`);
   
-  // Step 1: Split into manageable chunks
   const chunks = splitIntoChunks(transcription, 600);
-  console.log(`Split into ${chunks.length} chunks`);
+  console.log(`Split into ${chunks.length} text chunks`);
 
-  // Step 2: Generate mini-summary for each chunk
   const miniSummaries: string[] = [];
   for (let i = 0; i < chunks.length; i++) {
     const summary = await summarizeChunk(chunks[i], i);
     miniSummaries.push(summary);
   }
 
-  // Step 3: Combine all mini-summaries into consolidated text
   const consolidatedText = miniSummaries.join("\n\n");
   console.log(`Consolidated ${miniSummaries.length} mini-summaries`);
 
-  // Step 4: Generate final structured output from consolidated summaries
   return await generateFinalContent(consolidatedText);
 }
 
 /**
  * Generates the final structured content (summary, notes, Q&A).
- * Called either with full transcript (short) or consolidated summaries (long).
- * 
- * @param content - Either full transcript or consolidated mini-summaries
- * @returns Structured output with summary, notes, and Q&A
  */
 async function generateFinalContent(content: string): Promise<{
   summary: string;
@@ -183,7 +276,7 @@ async function generateFinalContent(content: string): Promise<{
 
 // ============================================================
 // MOCK RESPONSES
-// Used when AI API is unavailable to prevent complete failure
+// Used when AI API is unavailable
 // ============================================================
 
 function getMockResponse(transcription: string) {
@@ -210,24 +303,34 @@ function getMockResponse(transcription: string) {
 }
 
 export async function registerRoutes(httpServer: Server, app: Express): Promise<Server> {
-  // Main processing endpoint - handles both uploaded files and recorded audio
+  
+  // ============================================================
+  // MAIN PROCESSING ENDPOINT
+  // Handles file upload, audio chunking, transcription, and AI processing
+  // ============================================================
   app.post(api.process.path, upload.single("audio"), async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ message: "No audio file provided" });
       }
 
-      console.log(`Processing file: ${req.file.originalname || "recording"}, Size: ${req.file.size} bytes`);
+      const fileSizeMB = req.file.size / (1024 * 1024);
+      console.log(`Processing file: ${req.file.originalname || "recording"}, Size: ${fileSizeMB.toFixed(2)} MB`);
 
       // ============================================================
-      // STEP 1: TRANSCRIPTION
-      // Determine audio format and convert if needed
+      // FILE SIZE VALIDATION
+      // Provide friendly error for files that are too large
       // ============================================================
-      
-      let audioBuffer = req.file.buffer;
-      let format: "wav" | "mp3" | "webm" = "webm";
-      
-      // Detect format from mimetype or filename
+      if (req.file.size > MAX_FILE_SIZE) {
+        return res.status(413).json({ 
+          message: `File too large (${fileSizeMB.toFixed(1)} MB). Maximum allowed is ${MAX_FILE_SIZE / (1024 * 1024)} MB. Please try a shorter recording or compress the audio file.`
+        });
+      }
+
+      // ============================================================
+      // STEP 1: DETERMINE AUDIO FORMAT
+      // ============================================================
+      let format = "webm";
       const mimeType = req.file.mimetype.toLowerCase();
       const filename = (req.file.originalname || "").toLowerCase();
       
@@ -236,25 +339,33 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       } else if (mimeType.includes("mp3") || mimeType.includes("mpeg") || filename.endsWith(".mp3")) {
         format = "mp3";
       } else if (mimeType.includes("m4a") || filename.endsWith(".m4a")) {
-        // M4A needs conversion - treat as webm for now
-        format = "webm";
+        format = "m4a";
       } else if (mimeType.includes("webm") || filename.endsWith(".webm")) {
-        // WebM from browser recording - convert to WAV for better transcription
-        console.log("Converting WebM to WAV...");
-        try {
-          audioBuffer = await convertWebmToWav(req.file.buffer);
-          format = "wav";
-        } catch (convErr) {
-          console.log("WebM conversion failed, trying direct:", convErr);
-          format = "webm";
-        }
+        format = "webm";
       }
       
-      console.log(`Transcribing audio (${format})...`);
+      console.log(`Audio format detected: ${format}`);
+
+      // ============================================================
+      // STEP 2: AUDIO CHUNKING & TRANSCRIPTION
+      // For long audio files, split into 3-minute chunks and
+      // transcribe each separately, then merge results
+      // ============================================================
       let transcription: string;
       
       try {
-        transcription = await speechToText(audioBuffer, format);
+        console.log("Splitting audio into chunks for transcription...");
+        const audioChunks = await splitAudioIntoChunks(req.file.buffer, format);
+        
+        console.log("Transcribing audio chunks...");
+        transcription = await transcribeChunks(audioChunks);
+        
+        if (!transcription || transcription.trim().length === 0) {
+          return res.status(400).json({ 
+            message: "Could not transcribe audio. Please ensure the recording contains clear speech." 
+          });
+        }
+        
       } catch (transcribeErr: any) {
         console.error("Transcription failed:", transcribeErr);
         return res.status(500).json({ 
@@ -262,19 +373,17 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
         });
       }
       
-      console.log("Transcription complete, length:", transcription.length, "chars");
+      console.log(`Transcription complete: ${transcription.length} chars, ~${transcription.split(/\s+/).length} words`);
 
       // ============================================================
-      // STEP 2: AI PROCESSING WITH CHUNKING
-      // Process transcript (uses chunking for long lectures)
+      // STEP 3: AI PROCESSING WITH TEXT CHUNKING
+      // Process transcript (uses text chunking for long transcripts)
       // ============================================================
-      
       let content;
       try {
         content = await processLongTranscript(transcription);
         console.log("AI processing complete");
       } catch (aiErr: any) {
-        // If AI fails, return mock response with transcription
         console.error("AI processing failed:", aiErr);
         content = getMockResponse(transcription);
       }
@@ -297,8 +406,26 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
 
     } catch (error: any) {
       console.error("Processing error:", error);
+      
+      // Handle multer file size errors
+      if (error.code === "LIMIT_FILE_SIZE") {
+        return res.status(413).json({ 
+          message: `File too large. Maximum allowed is ${MAX_FILE_SIZE / (1024 * 1024)} MB. Please try a shorter recording.`
+        });
+      }
+      
       res.status(500).json({ message: error.message || "Failed to process audio" });
     }
+  });
+
+  // Error handling middleware for multer
+  app.use((err: any, req: any, res: any, next: any) => {
+    if (err.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({ 
+        message: `File too large. Maximum allowed is ${MAX_FILE_SIZE / (1024 * 1024)} MB.`
+      });
+    }
+    next(err);
   });
 
   return httpServer;
