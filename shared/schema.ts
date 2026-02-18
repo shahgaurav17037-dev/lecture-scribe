@@ -8,12 +8,19 @@ export const notes = pgTable("notes", {
   fileName: text("file_name").notNull(),
   transcription: text("transcription").notNull(),
   summary: text("summary").notNull(),
+
   // Stored as JSONB in DB, but we strictly type it for TS
-  structuredNotes: jsonb("structured_notes").$type<{ heading: string; points: string[] }[]>().notNull(),
-  qaPairs: jsonb("qa_pairs").$type<{ question: string; answer: string; marks: 2 | 4 }[]>().notNull(),
+  structuredNotes: jsonb("structured_notes")
+    .$type<{ heading: string; points: string[] }[]>()
+    .notNull(),
+
+  // ✅ FIXED: dynamic marks instead of 2 | 4
+  qaPairs: jsonb("qa_pairs")
+    .$type<{ question: string; answer: string; marks: number }[]>()
+    .notNull(),
 });
 
-export const insertNoteSchema = createInsertSchema(notes).omit({ id: true });
+export const insertNoteSchema = createInsertSchema(notes);
 
 export type Note = typeof notes.$inferSelect;
 export type InsertNote = z.infer<typeof insertNoteSchema>;
@@ -24,10 +31,11 @@ export const structuredNoteItemSchema = z.object({
   points: z.array(z.string()),
 });
 
+// ✅ FIXED: dynamic marks validation
 export const qaPairItemSchema = z.object({
   question: z.string(),
   answer: z.string(),
-  marks: z.union([z.literal(2), z.literal(4)]),
+  marks: z.number().int().positive(),
 });
 
 export type StructuredNoteItem = z.infer<typeof structuredNoteItemSchema>;

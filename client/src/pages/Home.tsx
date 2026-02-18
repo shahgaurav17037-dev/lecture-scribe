@@ -5,106 +5,176 @@ import { useProcessLecture } from "@/hooks/use-lecture";
 import { useToast } from "@/hooks/use-toast";
 import { Sparkles, ArrowLeft } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import type { structuredNoteItemSchema, qaPairItemSchema } from "@shared/schema";
-import { z } from "zod";
-
-type ProcessResult = {
-  transcription: string;
-  summary: string;
-  structuredNotes: z.infer<typeof structuredNoteItemSchema>[];
-  qaPairs: z.infer<typeof qaPairItemSchema>[];
-};
 
 export default function Home() {
-  const [result, setResult] = useState<ProcessResult | null>(null);
-  const { mutate: processLecture, isPending } = useProcessLecture();
+  const { generateLecture, loading, result } = useProcessLecture();
   const { toast } = useToast();
 
-  const handleFileSelect = (file: File) => {
-    processLecture(file, {
-      onSuccess: (data) => {
-        setResult(data);
+  const [mode, setMode] = useState<"theory" | "numerical">("theory");
+
+  // ✅ MARKS STATE
+  const [selectedMarks, setSelectedMarks] = useState<number[]>([]);
+  const [customMarks, setCustomMarks] = useState<number | "">("");
+
+  const toggleMark = (mark: number) => {
+    if (selectedMarks.includes(mark)) {
+      setSelectedMarks(selectedMarks.filter((m) => m !== mark));
+    } else {
+      if (selectedMarks.length >= 2) {
         toast({
-          title: "Success!",
-          description: "Your lecture has been processed successfully.",
-        });
-      },
-      onError: (error) => {
-        toast({
-          title: "Error processing audio",
-          description: error.message,
+          title: "Limit Reached",
+          description: "You can select maximum 2 mark types.",
           variant: "destructive",
         });
-      },
-    });
+        return;
+      }
+      setSelectedMarks([...selectedMarks, mark]);
+    }
+  };
+
+  const handleCustomAdd = () => {
+    if (!customMarks || customMarks < 2 || customMarks > 20) {
+      toast({
+        title: "Invalid Marks",
+        description: "Custom marks must be between 2 and 20.",
+        variant: "destructive",
+      });
+      return;
+    }
+    toggleMark(Number(customMarks));
+    setCustomMarks("");
+  };
+
+  const handleFileSelect = async (file: File) => {
+    if (selectedMarks.length === 0) {
+      toast({
+        title: "Select Marks",
+        description: "Please select at least one marks type.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      await generateLecture(file, mode, selectedMarks);
+
+      toast({
+        title: "Success",
+        description: "Lecture processed successfully",
+      });
+    } catch (err: any) {
+      toast({
+        title: "Error",
+        description: err.message || "Something went wrong",
+        variant: "destructive",
+      });
+    }
   };
 
   const reset = () => {
-    setResult(null);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.location.reload();
   };
 
   return (
     <div className="min-h-screen bg-background pb-20">
-      {/* Header */}
-      <header className="border-b border-border/40 bg-white/80 backdrop-blur-md sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <header className="border-b bg-white/80 backdrop-blur sticky top-0 z-50">
+        <div className="max-w-7xl mx-auto h-16 flex items-center justify-between px-4">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center text-white">
+            <div className="w-8 h-8 bg-primary text-white rounded-lg flex items-center justify-center">
               <Sparkles className="w-5 h-5" />
             </div>
-            <h1 className="text-xl font-bold font-display tracking-tight">LectureAI</h1>
+            <h1 className="text-xl font-bold">LectureAI</h1>
           </div>
+
           {result && (
-            <Button variant="ghost" size="sm" onClick={reset} className="gap-2">
-              <ArrowLeft className="w-4 h-4" />
+            <Button variant="ghost" size="sm" onClick={reset}>
+              <ArrowLeft className="w-4 h-4 mr-2" />
               Upload Another
             </Button>
           )}
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-12">
+      <main className="max-w-7xl mx-auto px-4 pt-12">
         {!result ? (
-          <div className="max-w-3xl mx-auto text-center space-y-12">
-            <div className="space-y-4">
-              <h2 className="text-4xl md:text-5xl font-bold font-display tracking-tight text-foreground">
-                Turn your lectures into <br />
-                <span className="text-primary">perfect study notes</span>
-              </h2>
-              <p className="text-lg text-muted-foreground max-w-xl mx-auto">
-                Upload your class recording and get an instant summary, structured notes, and exam practice questions powered by AI.
+          <div className="max-w-3xl mx-auto text-center space-y-8">
+
+            <div>
+              <p className="text-purple-400 text-sm font-medium">
+                Turn your lectures into
               </p>
+              <h2 className="text-4xl md:text-5xl font-bold text-purple-600">
+                Perfect Notes
+              </h2>
             </div>
 
-            <div className="bg-gradient-to-b from-white to-slate-50 rounded-3xl p-2">
-              <FileUpload onFileSelect={handleFileSelect} isProcessing={isPending} />
+            {/* MODE SELECTOR */}
+            <div className="flex justify-center gap-4">
+              <button
+                onClick={() => setMode("theory")}
+                className={`px-4 py-2 rounded-lg border text-sm font-medium ${
+                  mode === "theory"
+                    ? "bg-purple-600 text-white"
+                    : "bg-white text-muted-foreground"
+                }`}
+              >
+                📘 Theory Mode
+              </button>
+
+              <button
+                onClick={() => setMode("numerical")}
+                className={`px-4 py-2 rounded-lg border text-sm font-medium ${
+                  mode === "numerical"
+                    ? "bg-purple-600 text-white"
+                    : "bg-white text-muted-foreground"
+                }`}
+              >
+                🧮 Numerical Mode
+              </button>
             </div>
 
-            {/* Feature Highlights */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 pt-12 text-left">
-              <div className="space-y-2">
-                <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center text-blue-600 mb-4">
-                  <span className="font-bold">1</span>
-                </div>
-                <h3 className="font-bold text-lg">Upload Audio</h3>
-                <p className="text-sm text-muted-foreground">Support for MP3 and WAV files directly from your recorder.</p>
+            {/* MARKS SELECTOR */}
+            <div className="border rounded-lg p-4 text-left space-y-3">
+              <p className="font-medium text-sm">
+                Select Question Marks (Max 2)
+              </p>
+
+              <div className="flex gap-4 flex-wrap">
+                {[2, 5, 10].map((mark) => (
+                  <label key={mark} className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedMarks.includes(mark)}
+                      onChange={() => toggleMark(mark)}
+                    />
+                    {mark} Marks
+                  </label>
+                ))}
               </div>
-              <div className="space-y-2">
-                <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center text-purple-600 mb-4">
-                  <span className="font-bold">2</span>
-                </div>
-                <h3 className="font-bold text-lg">AI Processing</h3>
-                <p className="text-sm text-muted-foreground">Advanced speech-to-text and analysis to extract key concepts.</p>
-              </div>
-              <div className="space-y-2">
-                <div className="w-10 h-10 rounded-full bg-green-100 flex items-center justify-center text-green-600 mb-4">
-                  <span className="font-bold">3</span>
-                </div>
-                <h3 className="font-bold text-lg">Study Smart</h3>
-                <p className="text-sm text-muted-foreground">Get summaries, bullet points, and practice questions instantly.</p>
+
+              <div className="flex gap-2 items-center">
+                <input
+                  type="number"
+                  placeholder="Custom"
+                  value={customMarks}
+                  onChange={(e) =>
+                    setCustomMarks(
+                      e.target.value ? Number(e.target.value) : ""
+                    )
+                  }
+                  className="border rounded px-2 py-1 w-24"
+                />
+                <Button type="button" onClick={handleCustomAdd}>
+                  Add
+                </Button>
               </div>
             </div>
+
+            <FileUpload
+              onFileSelect={handleFileSelect}
+              isProcessing={loading}
+            />
+
           </div>
         ) : (
           <ResultsView data={result} />
