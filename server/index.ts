@@ -20,7 +20,7 @@ declare global {
 app.use(
   express.json({
     verify: (req, _res, buf) => {
-      (req as any).rawBody = buf;
+      (req as any).rawBody = buf; // ✅ Correct verify signature
     },
   })
 );
@@ -87,7 +87,7 @@ app.use((req: Request, res: Response, next: NextFunction) => {
 
   /* -------- DEV / PROD -------- */
   if (process.env.NODE_ENV === "production") {
-    serveStatic(app);
+    serveStatic(app); // ✅ Uses corrected static.ts
   } else {
     const { setupVite } = await import("./vite");
     await setupVite(httpServer, app);
