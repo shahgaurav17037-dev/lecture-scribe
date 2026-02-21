@@ -25,7 +25,7 @@ async function splitAudioIntoChunks(
   audioBuffer: Buffer,
   format: string
 ): Promise<Buffer[]> {
-  const tempDir = fs.mkdtempSync(path.join("E:\\temp\\", "audio-"));
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "audio-"));
   const inputPath = path.join(tempDir, `input.${format}`);
   const outputPattern = path.join(tempDir, "chunk_%03d.wav");
 
