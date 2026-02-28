@@ -22,7 +22,7 @@ export interface AISummary {
 
 /* ---------------- TOKEN SAFE CHUNKING ---------------- */
 
-function chunkText(text: string, maxLength = 3500): string[] {
+function chunkText(text: string, maxLength = 2800): string[] {
   const chunks: string[] = [];
   let start = 0;
 
@@ -45,6 +45,16 @@ function safeJSONParse(content: string): any | null {
     console.error("JSON parse failed:", err);
     return null;
   }
+}
+
+/* ---------------- ENGLISH ENFORCEMENT ---------------- */
+
+function enforceEnglish(text: string): string {
+  if (!text) return "";
+  return text
+    .replace(/[\u0900-\u097F]/g, "") // Remove Hindi script
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 /* ---------------- UNIVERSAL ACADEMIC PROMPT ---------------- */
@@ -101,7 +111,7 @@ export async function generateAISummary(
   let combinedSummary = "";
   let combinedNotes: AISummary["structuredNotes"] = [];
 
-  const BATCH_SIZE = 3; // safer for 8B model
+  const BATCH_SIZE = 3; // 3 chunks per batch
 
   /* ---------------- STEP 1: SUMMARIZE CHUNKS ---------------- */
 
@@ -131,8 +141,14 @@ export async function generateAISummary(
     for (const parsed of results) {
       if (!parsed) continue;
 
-      combinedSummary += " " + parsed.summary;
-      combinedNotes.push(...parsed.structuredNotes);
+      combinedSummary += " " + enforceEnglish(parsed.summary);
+
+      combinedNotes.push(
+        ...parsed.structuredNotes.map((note: any) => ({
+          heading: enforceEnglish(note.heading),
+          points: note.points.map((p: string) => enforceEnglish(p)),
+        }))
+      );
     }
 
     await new Promise((res) => setTimeout(res, 1200));
@@ -186,7 +202,13 @@ Return ONLY valid JSON:
 
     if (content) {
       const parsed = safeJSONParse(content);
-      combinedQA = parsed?.qaPairs || [];
+
+      combinedQA =
+        parsed?.qaPairs?.map((qa: any) => ({
+          question: enforceEnglish(qa.question),
+          answer: enforceEnglish(qa.answer),
+          marks: qa.marks,
+        })) || [];
     }
   } catch (err) {
     console.error("Q&A generation failed:", err);
@@ -196,7 +218,7 @@ Return ONLY valid JSON:
 
   return {
     transcription: transcript,
-    summary: combinedSummary.trim(),
+    summary: enforceEnglish(combinedSummary.trim()),
     structuredNotes: combinedNotes,
     qaPairs: combinedQA,
   };
