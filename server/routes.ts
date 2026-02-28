@@ -64,30 +64,42 @@ async function splitAudioIntoChunks(
 /* ---------------- SAFE TRANSCRIBE (FIXED) ---------------- */
 
 async function transcribeChunks(chunks: Buffer[]): Promise<string> {
-  const BATCH_SIZE = 5;
+  const BATCH_SIZE = 3;
   const results: string[] = [];
 
   for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
     const batch = chunks.slice(i, i + BATCH_SIZE);
+    const batchNumber = Math.floor(i / BATCH_SIZE) + 1;
 
-    console.log(`🚀 Processing batch ${i / BATCH_SIZE + 1}`);
+    console.log(`\n🚀 Processing Batch ${batchNumber}`);
 
     const batchResults = await Promise.all(
-      batch.map((chunk, index) => {
-        console.log(`🎤 Transcribing chunk ${i + index + 1}`);
-        return transcribeAudio(chunk);
+      batch.map(async (chunk, index) => {
+        const chunkNumber = i + index + 1;
+
+        console.log(`🎤 Transcribing chunk ${chunkNumber}`);
+
+        try {
+          const text = await transcribeAudio(chunk);
+          return text;
+        } catch (err) {
+          console.error(`❌ Failed to transcribe chunk ${chunkNumber}`, err);
+          return ""; // prevent Promise.all crash
+        }
       })
     );
 
     results.push(...batchResults);
 
-    // Small delay to avoid hitting API rate limits
-    await new Promise((res) => setTimeout(res, 1500));
+    // Small delay between batches (rate-limit protection)
+    await new Promise((res) => setTimeout(res, 1200));
   }
 
-  return results.join("\n\n").trim();
+  return results
+    .filter(Boolean) // remove failed empty chunks
+    .join("\n\n")
+    .trim();
 }
-
 /* ---------------- ROUTES ---------------- */
 
 export async function registerRoutes(
